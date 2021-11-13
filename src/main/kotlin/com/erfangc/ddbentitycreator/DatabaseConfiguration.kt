@@ -11,7 +11,6 @@ class DatabaseConfiguration {
     fun dynamoDbClient(): DynamoDbClient {
         return DynamoDbClient
             .builder()
-            .endpointOverride(URI.create("http://localhost:8000"))
             .build()
     }
 }
