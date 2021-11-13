@@ -6,9 +6,9 @@ import software.amazon.awssdk.services.dynamodb.DynamoDbClient
 import java.net.URI
 
 @Configuration
-class DbCfg {
+class DatabaseConfiguration {
     @Bean
     fun dynamoDbClient(): DynamoDbClient {
-        return DynamoDbClient.builder().endpointOverride(URI.create("http://localhost:8000")).build()
+        return DynamoDbClient.builder().build()
     }
 }

@@ -9,7 +9,7 @@ import software.amazon.awssdk.services.dynamodb.DynamoDbClient
 
 @RestController
 @RequestMapping("books")
-class Ctrl(private val dynamoDbClient: DynamoDbClient) {
+class BooksController(dynamoDbClient: DynamoDbClient) {
     private val dynamoDbEnhancedClient = DynamoDbEnhancedClient
         .builder()
         .dynamoDbClient(dynamoDbClient)
@@ -34,6 +34,6 @@ class Ctrl(private val dynamoDbClient: DynamoDbClient) {
                 .partitionValue(country)
                 .sortValue(isbnNumber)
                 .build()
-        )
+        ) ?: error("Book not found")
     }
 }

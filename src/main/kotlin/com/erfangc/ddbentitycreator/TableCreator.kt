@@ -12,82 +12,49 @@ import software.amazon.awssdk.services.dynamodb.model.*
 import java.lang.reflect.Method
 
 /**
- *
+ * Creates DynamoDB table(s) from annotated data classes/POJOs for local testing
+ * purposes
  */
 @Service
 class TableCreator(private val dynamoDbClient: DynamoDbClient) {
 
     private val log = LoggerFactory.getLogger(TableCreator::class.java)
 
-    fun <T> createTable(tableName: String, clazz: Class<T>) {
-        val tableExists = try {
-            val response = dynamoDbClient.describeTable(DescribeTableRequest.builder().tableName(tableName).build())
-            response.table().tableName() == tableName
-        } catch (e: ResourceNotFoundException) {
-            false
-        }
+    fun <T> createTable(
+        tableName: String,
+        clazz: Class<T>
+    ) {
 
-        if (tableExists) {
+        if (tableExists(tableName)) {
             log.info("The DynamoDB table $tableName already exist, will not attempt to create a new one")
             return
         } else {
             log.info("The DynamoDB table $tableName does not exist - introspecting and creating from annotated entity class")
         }
 
-        val className = clazz.simpleName
-        val ctrBuilder = CreateTableRequest.builder()
-        val methods = clazz.declaredMethods
+        val keySchemaElements = scanForKeySchemaElements(clazz)
+        val globalSecondaryIndexes = scanForSecondaryIndexes(clazz)
+        val attributeDefinitions = scanForAttributeDefinitions(clazz)
 
-        val keySchemaElements = arrayListOf<KeySchemaElement>()
-        val attributeMethods = hashSetOf<Method>()
+        val createTableRequest = CreateTableRequest
+            .builder()
+            .keySchema(keySchemaElements)
+            .globalSecondaryIndexes(globalSecondaryIndexes)
+            .tableName(tableName)
+            .billingMode(BillingMode.PAY_PER_REQUEST)
+            .attributeDefinitions(attributeDefinitions)
+            .build()
 
-        /*
-        Find the hash key
-         */
-        val pks = methods.filter { method -> method.isAnnotationPresent(DynamoDbPartitionKey::class.java) }
-        if (pks.isEmpty()) {
-            error("$className must declare a partition key")
-        }
-        if (pks.size > 1) {
-            error("$className must only declare a single partition key")
-        }
+        doCreateTableRequest(tableName, createTableRequest)
+    }
 
-        val pkMethod = pks.first()
-        keySchemaElements.add(
-            KeySchemaElement
-                .builder()
-                .keyType(KeyType.HASH)
-                .attributeName(attributeName(pkMethod))
-                .build()
-        )
-        attributeMethods.add(pkMethod)
-
-        /*
-        Find the sort key
-         */
-        val sks = methods
-            .filter { method -> method.isAnnotationPresent(DynamoDbSortKey::class.java) }
-
-        if (sks.size > 1) {
-            error("$className must only declare a single sort key")
-        }
-
-        if (sks.isNotEmpty()) {
-            val skMethod = sks.first()
-            keySchemaElements.add(
-                KeySchemaElement
-                    .builder()
-                    .keyType(KeyType.RANGE)
-                    .attributeName(attributeName(skMethod))
-                    .build()
-            )
-            attributeMethods.add(skMethod)
-        }
-
+    private fun <T> scanForSecondaryIndexes(
+        clazz: Class<T>
+    ): ArrayList<GlobalSecondaryIndex> {
         /*
         Collect all the index members as tuples then group by their index name
          */
-        val methodsByIndexName = methods.filter { method ->
+        val methodsByIndexName = clazz.declaredMethods.filter { method ->
             method.isAnnotationPresent(DynamoDbSecondaryPartitionKey::class.java) ||
                     method.isAnnotationPresent(DynamoDbSecondarySortKey::class.java)
         }.flatMap { method ->
@@ -110,10 +77,10 @@ class TableCreator(private val dynamoDbClient: DynamoDbClient) {
                     method.second.isAnnotationPresent(DynamoDbSecondaryPartitionKey::class.java)
                 }
             if (pks.isEmpty()) {
-                error("index $indexName on $className must declare a partition key")
+                error("index $indexName on ${clazz.simpleName} must declare a partition key")
             }
             if (pks.size > 1) {
-                error("index $indexName on $className must declare only 1 partition key")
+                error("index $indexName on ${clazz.simpleName} must declare only 1 partition key")
             }
             val pk = pks.first().second
             keySchemaElements.add(
@@ -123,14 +90,12 @@ class TableCreator(private val dynamoDbClient: DynamoDbClient) {
                     .attributeName(attributeName(pk))
                     .build()
             )
-            attributeMethods.add(pk)
-
             val sks = methods.filter { method ->
                 method.second.isAnnotationPresent(DynamoDbSecondarySortKey::class.java)
             }
 
             if (sks.size > 1) {
-                error("index $indexName on $className must only declare a single sort key")
+                error("index $indexName on ${clazz.simpleName} must only declare a single sort key")
             }
 
             if (sks.isNotEmpty()) {
@@ -142,34 +107,98 @@ class TableCreator(private val dynamoDbClient: DynamoDbClient) {
                         .attributeName(attributeName(sk))
                         .build()
                 )
-                attributeMethods.add(sk)
             }
-
             globalSecondaryIndexes.add(gsiBuilder.keySchema(keySchemaElements).build())
         }
+        return globalSecondaryIndexes
+    }
 
-        val createTableRequest = ctrBuilder
-            .keySchema(keySchemaElements)
-            .globalSecondaryIndexes(globalSecondaryIndexes)
-            .tableName(tableName)
-            .billingMode(BillingMode.PAY_PER_REQUEST)
-            .attributeDefinitions(toAttributeDefinitions(attributeMethods))
-            .build()
+    private fun <T> scanForKeySchemaElements(clazz: Class<T>): List<KeySchemaElement> {
+        val ret = arrayListOf<KeySchemaElement>()
+        /*
+        Find the hash key
+         */
+        val pks = clazz
+            .declaredMethods
+            .filter { method -> method.isAnnotationPresent(DynamoDbPartitionKey::class.java) }
+        if (pks.isEmpty()) {
+            error("${clazz.simpleName} must declare a partition key")
+        }
+        if (pks.size > 1) {
+            error("${clazz.simpleName} must only declare a single partition key")
+        }
 
+        val pkMethod = pks.first()
+
+        ret.add(
+            KeySchemaElement
+                .builder()
+                .keyType(KeyType.HASH)
+                .attributeName(attributeName(pkMethod))
+                .build()
+        )
+
+        /*
+        Find the sort key
+         */
+        val sks = clazz
+            .declaredMethods
+            .filter { method -> method.isAnnotationPresent(DynamoDbSortKey::class.java) }
+
+        if (sks.size > 1) {
+            error("${clazz.simpleName} must only declare a single sort key")
+        }
+
+        if (sks.isNotEmpty()) {
+            val skMethod = sks.first()
+            ret.add(
+                KeySchemaElement
+                    .builder()
+                    .keyType(KeyType.RANGE)
+                    .attributeName(attributeName(skMethod))
+                    .build()
+            )
+        }
+
+        return ret
+    }
+
+    private fun doCreateTableRequest(
+        tableName: String,
+        createTableRequest: CreateTableRequest?
+    ) {
         log.info("Creating table $tableName createTableRequest=$createTableRequest")
         val response = dynamoDbClient.createTable(createTableRequest)
         val tableDescription = response.tableDescription()
-
-        val tableId = tableDescription.tableId()
-        val tableName = tableDescription.tableName()
-        val tableArn = tableDescription.tableArn()
-        val tableStatus = tableDescription.tableStatus()
-
-        log.info("CreateTableResponse tableId=$tableId, tableName=$tableName, tableArn=$tableArn, tableStatus=$tableStatus")
+        log.info(
+            "CreateTableResponse tableId=${tableDescription.tableId()}, " +
+                    "tableName=${tableDescription.tableName()}, " +
+                    "tableArn=${tableDescription.tableArn()}, " +
+                    "tableStatus=${tableDescription.tableStatus()}"
+        )
     }
 
-    private fun toAttributeDefinitions(methods: Set<Method>): List<AttributeDefinition> {
-        return methods.map { method ->
+    private fun tableExists(tableName: String): Boolean {
+        val tableExists = try {
+            val response = dynamoDbClient.describeTable(DescribeTableRequest.builder().tableName(tableName).build())
+            response.table().tableName() == tableName
+        } catch (e: ResourceNotFoundException) {
+            false
+        }
+        return tableExists
+    }
+
+    private fun <T> scanForAttributeDefinitions(clazz: Class<T>): List<AttributeDefinition> {
+
+        val attributeMethods = clazz.methods.filter { method ->
+            val partitionKey = method.isAnnotationPresent(DynamoDbPartitionKey::class.java)
+            val sortKey = method.isAnnotationPresent(DynamoDbSortKey::class.java)
+            val secondaryPartitionKey = method.isAnnotationPresent(DynamoDbSecondaryPartitionKey::class.java)
+            val secondarySortKey = method.isAnnotationPresent(DynamoDbSecondarySortKey::class.java)
+            partitionKey || sortKey || secondaryPartitionKey || secondarySortKey
+        }
+
+        return attributeMethods.map { method ->
             AttributeDefinition
                 .builder()
                 .attributeType(attributeType(method))
@@ -196,8 +225,7 @@ class TableCreator(private val dynamoDbClient: DynamoDbClient) {
     private fun attributeName(method: Method): String {
         val propertyDescriptor = BeanUtils.findPropertyForMethod(method)
             ?: error("Unable to find a property for method $method")
-        val attributeName = propertyDescriptor.name
-        return attributeName
+        return propertyDescriptor.name
     }
 
 }
