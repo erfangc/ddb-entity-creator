@@ -9,6 +9,9 @@ import java.net.URI
 class DatabaseConfiguration {
     @Bean
     fun dynamoDbClient(): DynamoDbClient {
-        return DynamoDbClient.builder().build()
+        return DynamoDbClient
+            .builder()
+            .endpointOverride(URI.create("http://localhost:8000"))
+            .build()
     }
 }
